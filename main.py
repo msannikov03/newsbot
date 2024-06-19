@@ -1,7 +1,6 @@
 import logging
 import json
 import requests
-import re
 import sqlite3
 import os
 from openai import AsyncOpenAI
@@ -119,16 +118,21 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     interests = get_user_interests(user_id)
     if not interests:
-        await update.message.reply_text("You have no interests set. Use /setinterests to set your interests.")
+        await update.message.reply_text("You have no interests set. Use /addinterest to set your interests.")
         return
     
-    if update.message.text.startswith("/topnews"):
-        articles = fetch_news(f"https://newsapi.org/v2/top-headlines?country=us&pageSize=10&apiKey={NEWSAPI_API_KEY}")
+    command = update.message.text.split()[0]
+    if command == "/topnews":
+        articles = fetch_news(f"https://newsapi.org/v2/top-headlines?country=us&pageSize=20&apiKey={NEWSAPI_API_KEY}")
     else:
         query = ' '.join(update.message.text.split()[1:]) or 'latest'
-        articles = fetch_news(f"https://newsapi.org/v2/everything?q={query}&language=en&pageSize=10&apiKey={NEWSAPI_API_KEY}")
+        articles = fetch_news(f"https://newsapi.org/v2/everything?q={query}&language=en&pageSize=20&apiKey={NEWSAPI_API_KEY}")
     
     filtered_articles = await fetch_and_filter_news(interests, articles)
+    if not filtered_articles:
+        await update.message.reply_text("No relevant news found based on your interests.")
+        return
+
     for article in filtered_articles:
         title = article['title']
         summary = article['description'] if article['description'] else "No summary available."
@@ -139,15 +143,37 @@ async def fetch_and_filter_news(interests, articles):
     prompts = [f"{article['title']} {article['description']}" for article in articles]
     try:
         responses = await client.chat.completions.create(
-            messages=[{"role": "system", "content": f"Filter the following articles based on these interests: {interests}"}] + 
-                      [{"role": "user", "content": prompt} for prompt in prompts],
             model="gpt-4o",
+            messages=[{"role": "system", "content": f"Filter the following articles based on these interests: {', '.join(interests)}. "
+                                                     f"For each article, respond with 'Relevant' if it matches any of the interests, "
+                                                     f"or 'Not Relevant' if it does not."}] + 
+                     [{"role": "user", "content": prompt} for prompt in prompts],
+            max_tokens=50,
+            n=len(prompts)
         )
-        filtered_articles = [article for article, response in zip(articles, responses.choices) if response.message.content.strip() == 'Relevant']
+        filtered_articles = []
+        for article, response in zip(articles, responses.choices):
+            if "Relevant" in response.message.content:
+                filtered_articles.append(article)
         return filtered_articles
     except Exception as error:
         logging.error(f"Error in filtering news: {error}", exc_info=True)
         return []
+
+async def test_gpt_integration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    test_prompt = "Technology advancements in 2024"
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": "Please generate a relevant news summary based on the following topic:"},
+                      {"role": "user", "content": test_prompt}],
+            max_tokens=100
+        )
+        result = response.choices[0].message.content
+        await update.message.reply_text(f"GPT-4 Response:\n{result}")
+    except Exception as error:
+        logging.error(f"Error in GPT-4 integration test: {error}", exc_info=True)
+        await update.message.reply_text(f"Error in GPT-4 integration test: {error}")
 
 def main():
     application = Application.builder().token(TOKEN).build()
@@ -168,6 +194,7 @@ def main():
     application.add_handler(CommandHandler("interests", interests_command))
     application.add_handler(CommandHandler("topnews", news_command))
     application.add_handler(CommandHandler("news", news_command))
+    application.add_handler(CommandHandler("testgpt", test_gpt_integration))
 
     application.run_polling()
 
